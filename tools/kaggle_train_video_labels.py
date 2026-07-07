@@ -44,6 +44,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model", default="yolov8m.pt")
     parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--patience", type=int, default=8)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--workers", type=int, default=2)
@@ -129,6 +130,7 @@ def main() -> None:
         f"model={args.model}",
         f"data={dataset_yaml}",
         f"epochs={args.epochs}",
+        f"patience={args.patience}",
         f"imgsz={args.imgsz}",
         f"batch={args.batch}",
         f"workers={args.workers}",
