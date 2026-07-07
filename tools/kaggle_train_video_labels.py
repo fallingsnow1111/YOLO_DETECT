@@ -1,10 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+
+REQUIRED_PACKAGES = {
+    "cv2": "opencv-python-headless",
+    "easydict": "easydict",
+    "git": "GitPython",
+    "hydra": "hydra-core",
+    "IPython": "IPython",
+    "thop": "thop",
+}
 
 
 def kaggle_path(name: str) -> Path:
@@ -39,8 +50,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="0")
     parser.add_argument("--project", type=Path, default=kaggle_path("runs"))
     parser.add_argument("--name", default="traffic_vehicle_yolov8m_video_labels")
+    parser.add_argument("--artifacts-output", type=Path, default=kaggle_path("paper_artifacts"))
     parser.add_argument("--jpg-quality", type=int, default=90)
     parser.add_argument("--no-overwrite", action="store_true", help="Do not rebuild output if it exists.")
+    parser.add_argument("--skip-install-deps", action="store_true", help="Skip missing dependency installation.")
+    parser.add_argument("--skip-export-artifacts", action="store_true", help="Skip paper artifact export.")
     return parser.parse_args()
 
 
@@ -49,10 +63,23 @@ def run(command: list[str], env: dict[str, str] | None = None) -> None:
     subprocess.run(command, check=True, env=env)
 
 
+def install_missing_deps() -> None:
+    missing = [
+        package
+        for module_name, package in REQUIRED_PACKAGES.items()
+        if importlib.util.find_spec(module_name) is None
+    ]
+    if missing:
+        run([sys.executable, "-m", "pip", "install", "-q", *missing])
+
+
 def main() -> None:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
     dataset_yaml = args.output / "traffic_vehicle.yaml"
+
+    if not args.skip_install_deps:
+        install_missing_deps()
 
     build_command = [
         sys.executable,
@@ -88,10 +115,26 @@ def main() -> None:
     ]
     run(train_command, env=env)
 
+    run_dir = args.project / args.name
+    if not args.skip_export_artifacts:
+        export_command = [
+            sys.executable,
+            str(repo_root / "tools" / "export_paper_artifacts.py"),
+            "--dataset",
+            str(args.output),
+            "--run",
+            str(run_dir),
+            "--output",
+            str(args.artifacts_output),
+        ]
+        run(export_command, env=env)
+
     weights = args.project / args.name / "weights" / "best.pt"
     print("\nDone.")
     print(f"Best weights: {weights}")
     print(f"Runtime dataset: {args.output}")
+    if not args.skip_export_artifacts:
+        print(f"Paper artifacts: {args.artifacts_output}")
 
 
 if __name__ == "__main__":
