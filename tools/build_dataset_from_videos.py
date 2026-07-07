@@ -189,6 +189,31 @@ def write_frame_image(frame, image_path: Path, jpg_quality: int) -> None:
         raise RuntimeError(f"Could not write image: {image_path}")
 
 
+def iter_ordered_video_frames(videos_dir: Path, video_id: str, frame_indices: list[int]):
+    if not frame_indices:
+        return
+
+    video_path = find_video(videos_dir, video_id)
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {video_path}")
+
+    try:
+        next_pos = None
+        for frame_idx in frame_indices:
+            if next_pos != frame_idx:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                raise RuntimeError(f"Could not read frame {frame_idx} from video {video_id}")
+
+            next_pos = frame_idx + 1
+            yield frame_idx, frame
+    finally:
+        cap.release()
+
+
 def build_from_zip_dataset(input_root: Path, output_root: Path, jpg_quality: int) -> tuple[Counter, Counter, Counter]:
     videos_dir = input_root / "mp4"
     labels_dir = input_root / "labels"
@@ -201,42 +226,46 @@ def build_from_zip_dataset(input_root: Path, output_root: Path, jpg_quality: int
     if not zip_paths:
         raise SystemExit(f"No label zip files found in: {labels_dir}")
 
-    reader = VideoReaderCache(videos_dir)
     image_counts = Counter()
     empty_counts = Counter()
     box_counts: Counter[int] = Counter()
 
-    try:
-        for zip_path in zip_paths:
-            video_id = zip_path.stem
-            split = split_for_zip(video_id)
-            with zipfile.ZipFile(zip_path) as zf:
-                label_entries = collect_zip_labels(zf)
-                frame_indices = collect_zip_frames(zf, label_entries)
+    for zip_path in zip_paths:
+        video_id = zip_path.stem
+        split = split_for_zip(video_id)
+        with zipfile.ZipFile(zip_path) as zf:
+            label_entries = collect_zip_labels(zf)
+            frame_indices = collect_zip_frames(zf, label_entries)
+            total = len(frame_indices)
+            print(
+                f"Extracting {zip_path.name} -> {split}: {total} frames, {len(label_entries)} labeled frames",
+                flush=True,
+            )
 
-                for frame_idx in frame_indices:
-                    out_stem = f"{video_id}_frame_{frame_idx:06d}"
-                    image_path = output_root / "images" / split / f"{out_stem}.jpg"
-                    out_label_path = output_root / "labels" / split / f"{out_stem}.txt"
+            for idx, (frame_idx, frame) in enumerate(
+                iter_ordered_video_frames(videos_dir, video_id, frame_indices), start=1
+            ):
+                out_stem = f"{video_id}_frame_{frame_idx:06d}"
+                image_path = output_root / "images" / split / f"{out_stem}.jpg"
+                out_label_path = output_root / "labels" / split / f"{out_stem}.txt"
 
-                    frame = reader.read_frame(video_id, frame_idx)
-                    write_frame_image(frame, image_path, jpg_quality)
+                write_frame_image(frame, image_path, jpg_quality)
 
-                    label_entry = label_entries.get(frame_idx)
-                    if label_entry is None:
-                        out_label_path.write_text("", encoding="utf-8")
+                label_entry = label_entries.get(frame_idx)
+                if label_entry is None:
+                    out_label_path.write_text("", encoding="utf-8")
+                    empty_counts[split] += 1
+                else:
+                    text = read_zip_text(zf, label_entry)
+                    normalized, counts = validate_label_text(text, f"{zip_path.name}:{label_entry}")
+                    out_label_path.write_text(normalized, encoding="utf-8")
+                    box_counts.update(counts)
+                    if not normalized.strip():
                         empty_counts[split] += 1
-                    else:
-                        text = read_zip_text(zf, label_entry)
-                        normalized, counts = validate_label_text(text, f"{zip_path.name}:{label_entry}")
-                        out_label_path.write_text(normalized, encoding="utf-8")
-                        box_counts.update(counts)
-                        if not normalized.strip():
-                            empty_counts[split] += 1
 
-                    image_counts[split] += 1
-    finally:
-        reader.close()
+                image_counts[split] += 1
+                if idx % 100 == 0 or idx == total:
+                    print(f"  {zip_path.name}: {idx}/{total}", flush=True)
 
     return image_counts, empty_counts, box_counts
 
