@@ -45,7 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default="yolov8m.pt")
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--batch", type=int, default=32)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--device", default="0")
     parser.add_argument("--project", type=Path, default=kaggle_path("runs"))

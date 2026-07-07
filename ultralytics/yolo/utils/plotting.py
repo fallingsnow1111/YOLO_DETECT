@@ -40,6 +40,13 @@ class Colors:
 colors = Colors()  # create instance for 'from utils.plots import colors'
 
 
+def font_text_size(font, text):
+    if hasattr(font, 'getbbox'):
+        left, top, right, bottom = font.getbbox(text)
+        return right - left, bottom - top
+    return font.getsize(text)
+
+
 class Annotator:
     # YOLOv5 Annotator for train/val mosaics and jpgs and detect/hub inference annotations
     def __init__(self, im, line_width=None, font_size=None, font='Arial.ttf', pil=False, example='abc'):
@@ -60,7 +67,7 @@ class Annotator:
         if self.pil or not is_ascii(label):
             self.draw.rectangle(box, width=self.lw, outline=color)  # box
             if label:
-                w, h = self.font.getsize(label)  # text width, height
+                w, h = font_text_size(self.font, label)  # text width, height
                 outside = box[1] - h >= 0  # label fits outside box
                 self.draw.rectangle(
                     (box[0], box[1] - h if outside else box[1], box[0] + w + 1,
