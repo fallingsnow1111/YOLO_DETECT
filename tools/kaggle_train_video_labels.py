@@ -73,6 +73,28 @@ def install_missing_deps() -> None:
         run([sys.executable, "-m", "pip", "install", "-q", *missing])
 
 
+def check_cuda_device(device: str) -> None:
+    if device.lower() == "cpu":
+        return
+    try:
+        import torch
+    except ImportError:
+        return
+
+    if not torch.cuda.is_available():
+        raise SystemExit("CUDA is not available. In Kaggle, enable GPU T4 x2, then rerun this script.")
+
+    device_id = int(device.split(",", maxsplit=1)[0])
+    name = torch.cuda.get_device_name(device_id)
+    major, minor = torch.cuda.get_device_capability(device_id)
+    print(f"CUDA device {device_id}: {name}, capability sm_{major}{minor}", flush=True)
+    if major < 7:
+        raise SystemExit(
+            "This Kaggle PyTorch build does not support this GPU architecture. "
+            "Use Kaggle Accelerator: GPU T4 x2 instead of GPU P100."
+        )
+
+
 def main() -> None:
     args = parse_args()
     repo_root = Path(__file__).resolve().parents[1]
@@ -80,6 +102,8 @@ def main() -> None:
 
     if not args.skip_install_deps:
         install_missing_deps()
+
+    check_cuda_device(args.device)
 
     build_command = [
         sys.executable,
