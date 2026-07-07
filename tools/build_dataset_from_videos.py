@@ -29,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output", required=True, type=Path, help="Output YOLO dataset directory.")
     parser.add_argument("--jpg-quality", type=int, default=90, help="JPEG quality for extracted frames.")
+    parser.add_argument(
+        "--class-map",
+        default="auto",
+        help="Source-to-target class map, e.g. 0:0,1:1,3:2. Use auto for CVAT 3/4-class exports.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Remove output directory before rebuilding.")
     return parser.parse_args()
 
@@ -65,8 +70,50 @@ def parse_frame_id(path_text: str) -> int | None:
     return int(match.group("frame"))
 
 
-def validate_label_text(text: str, source_name: str) -> tuple[str, Counter]:
+def parse_class_map(class_map_text: str, source_classes: set[int] | None = None) -> dict[int, int]:
+    if class_map_text == "auto":
+        if source_classes and 3 in source_classes:
+            return {0: 0, 1: 1, 3: 2}
+        return {0: 0, 1: 1, 2: 2}
+
+    class_map = {}
+    for item in class_map_text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        src, dst = item.split(":", maxsplit=1)
+        class_map[int(src)] = int(dst)
+    return class_map
+
+
+def parse_zip_names(zf: zipfile.ZipFile) -> dict[int, str]:
+    data_yaml_name = next((name for name in zf.namelist() if Path(name).name.lower() == "data.yaml"), None)
+    if data_yaml_name is None:
+        return {}
+
+    names = {}
+    for raw in read_zip_text(zf, data_yaml_name).splitlines():
+        match = re.match(r"\s*(\d+)\s*:\s*['\"]?([^'\"#]+)", raw)
+        if match:
+            names[int(match.group(1))] = match.group(2).strip()
+    return names
+
+
+def class_map_for_zip(zf: zipfile.ZipFile, class_map_text: str, source_classes: set[int]) -> dict[int, int]:
+    if class_map_text != "auto":
+        return parse_class_map(class_map_text)
+
+    source_names = parse_zip_names(zf)
+    if source_names:
+        target_by_name = {name: idx for idx, name in enumerate(NAMES)}
+        return {src: target_by_name[name] for src, name in source_names.items() if name in target_by_name}
+
+    return parse_class_map(class_map_text, source_classes)
+
+
+def validate_label_text(text: str, source_name: str, class_map: dict[int, int]) -> tuple[str, Counter, Counter]:
     counts: Counter[int] = Counter()
+    skipped: Counter[int] = Counter()
     lines = []
     for line_no, raw in enumerate(text.splitlines(), start=1):
         raw = raw.strip()
@@ -75,22 +122,26 @@ def validate_label_text(text: str, source_name: str) -> tuple[str, Counter]:
         parts = raw.split()
         if len(parts) != 5:
             raise ValueError(f"{source_name}:{line_no} should have 5 columns, got {len(parts)}")
-        cls_id = int(float(parts[0]))
+        src_cls_id = int(float(parts[0]))
+        if src_cls_id not in class_map:
+            skipped[src_cls_id] += 1
+            continue
+        cls_id = class_map[src_cls_id]
         if cls_id < 0 or cls_id >= len(NAMES):
-            raise ValueError(f"{source_name}:{line_no} class id {cls_id} is outside 0-{len(NAMES) - 1}")
+            raise ValueError(f"{source_name}:{line_no} target class id {cls_id} is outside 0-{len(NAMES) - 1}")
         coords = [float(v) for v in parts[1:]]
         if any(v < 0 or v > 1 for v in coords):
             raise ValueError(f"{source_name}:{line_no} bbox values must be normalized to 0-1")
         counts[cls_id] += 1
         lines.append(" ".join([str(cls_id), *parts[1:]]))
 
-    return (("\n".join(lines) + "\n") if lines else ""), counts
+    return (("\n".join(lines) + "\n") if lines else ""), counts, skipped
 
 
-def validate_and_copy_label(src: Path, dst: Path) -> Counter:
-    normalized, counts = validate_label_text(src.read_text(encoding="utf-8"), str(src))
+def validate_and_copy_label(src: Path, dst: Path, class_map: dict[int, int]) -> tuple[Counter, Counter]:
+    normalized, counts, skipped = validate_label_text(src.read_text(encoding="utf-8"), str(src), class_map)
     dst.write_text(normalized, encoding="utf-8")
-    return counts
+    return counts, skipped
 
 
 class VideoReaderCache:
@@ -183,6 +234,17 @@ def collect_zip_frames(zf: zipfile.ZipFile, label_entries: dict[int, str]) -> li
     return sorted(frames)
 
 
+def collect_zip_source_classes(zf: zipfile.ZipFile, label_entries: dict[int, str]) -> set[int]:
+    source_classes = set()
+    for name in label_entries.values():
+        for raw in read_zip_text(zf, name).splitlines():
+            raw = raw.strip()
+            if not raw:
+                continue
+            source_classes.add(int(float(raw.split()[0])))
+    return source_classes
+
+
 def write_frame_image(frame, image_path: Path, jpg_quality: int) -> None:
     ok = cv2.imwrite(str(image_path), frame, [cv2.IMWRITE_JPEG_QUALITY, jpg_quality])
     if not ok:
@@ -214,7 +276,9 @@ def iter_ordered_video_frames(videos_dir: Path, video_id: str, frame_indices: li
         cap.release()
 
 
-def build_from_zip_dataset(input_root: Path, output_root: Path, jpg_quality: int) -> tuple[Counter, Counter, Counter]:
+def build_from_zip_dataset(
+    input_root: Path, output_root: Path, jpg_quality: int, class_map_text: str
+) -> tuple[Counter, Counter, Counter, Counter]:
     videos_dir = input_root / "mp4"
     labels_dir = input_root / "labels"
     if not videos_dir.is_dir():
@@ -229,6 +293,7 @@ def build_from_zip_dataset(input_root: Path, output_root: Path, jpg_quality: int
     image_counts = Counter()
     empty_counts = Counter()
     box_counts: Counter[int] = Counter()
+    skipped_counts: Counter[int] = Counter()
 
     for zip_path in zip_paths:
         video_id = zip_path.stem
@@ -236,9 +301,11 @@ def build_from_zip_dataset(input_root: Path, output_root: Path, jpg_quality: int
         with zipfile.ZipFile(zip_path) as zf:
             label_entries = collect_zip_labels(zf)
             frame_indices = collect_zip_frames(zf, label_entries)
+            source_classes = collect_zip_source_classes(zf, label_entries)
+            class_map = class_map_for_zip(zf, class_map_text, source_classes)
             total = len(frame_indices)
             print(
-                f"Extracting {zip_path.name} -> {split}: {total} frames, {len(label_entries)} labeled frames",
+                f"Extracting {zip_path.name} -> {split}: {total} frames, {len(label_entries)} labeled frames, source_classes={sorted(source_classes)}, class_map={class_map}",
                 flush=True,
             )
 
@@ -257,9 +324,12 @@ def build_from_zip_dataset(input_root: Path, output_root: Path, jpg_quality: int
                     empty_counts[split] += 1
                 else:
                     text = read_zip_text(zf, label_entry)
-                    normalized, counts = validate_label_text(text, f"{zip_path.name}:{label_entry}")
+                    normalized, counts, skipped = validate_label_text(
+                        text, f"{zip_path.name}:{label_entry}", class_map
+                    )
                     out_label_path.write_text(normalized, encoding="utf-8")
                     box_counts.update(counts)
+                    skipped_counts.update(skipped)
                     if not normalized.strip():
                         empty_counts[split] += 1
 
@@ -267,10 +337,12 @@ def build_from_zip_dataset(input_root: Path, output_root: Path, jpg_quality: int
                 if idx % 100 == 0 or idx == total:
                     print(f"  {zip_path.name}: {idx}/{total}", flush=True)
 
-    return image_counts, empty_counts, box_counts
+    return image_counts, empty_counts, box_counts, skipped_counts
 
 
-def build_from_legacy_dataset(input_root: Path, output_root: Path, jpg_quality: int) -> tuple[Counter, Counter, Counter]:
+def build_from_legacy_dataset(
+    input_root: Path, output_root: Path, jpg_quality: int, class_map_text: str
+) -> tuple[Counter, Counter, Counter, Counter]:
     videos_dir = input_root / "videos"
     labels_dir = input_root / "labels"
     if not videos_dir.is_dir():
@@ -282,6 +354,8 @@ def build_from_legacy_dataset(input_root: Path, output_root: Path, jpg_quality: 
     image_counts = Counter()
     empty_counts = Counter()
     box_counts: Counter[int] = Counter()
+    skipped_counts: Counter[int] = Counter()
+    class_map = parse_class_map(class_map_text)
 
     try:
         for split in SPLITS:
@@ -297,15 +371,16 @@ def build_from_legacy_dataset(input_root: Path, output_root: Path, jpg_quality: 
                 frame = reader.read_frame(video_id, frame_idx)
                 write_frame_image(frame, image_path, jpg_quality)
 
-                counts = validate_and_copy_label(label_path, out_label_path)
+                counts, skipped = validate_and_copy_label(label_path, out_label_path, class_map)
                 box_counts.update(counts)
+                skipped_counts.update(skipped)
                 image_counts[split] += 1
                 if not out_label_path.read_text(encoding="utf-8").strip():
                     empty_counts[split] += 1
     finally:
         reader.close()
 
-    return image_counts, empty_counts, box_counts
+    return image_counts, empty_counts, box_counts, skipped_counts
 
 
 def main() -> None:
@@ -316,12 +391,12 @@ def main() -> None:
     prepare_output(output_root, args.overwrite)
 
     if (input_root / "mp4").is_dir() and (input_root / "labels").is_dir():
-        image_counts, empty_counts, box_counts = build_from_zip_dataset(
-            input_root, output_root, args.jpg_quality
+        image_counts, empty_counts, box_counts, skipped_counts = build_from_zip_dataset(
+            input_root, output_root, args.jpg_quality, args.class_map
         )
     else:
-        image_counts, empty_counts, box_counts = build_from_legacy_dataset(
-            input_root, output_root, args.jpg_quality
+        image_counts, empty_counts, box_counts, skipped_counts = build_from_legacy_dataset(
+            input_root, output_root, args.jpg_quality, args.class_map
         )
 
     write_yaml(output_root)
@@ -329,6 +404,7 @@ def main() -> None:
     print("Images:", dict(image_counts))
     print("Empty labels:", dict(empty_counts))
     print("Boxes:", {NAMES[i]: box_counts[i] for i in range(len(NAMES))})
+    print("Skipped source classes:", dict(skipped_counts))
     print("YAML:", output_root / "traffic_vehicle.yaml")
 
 
