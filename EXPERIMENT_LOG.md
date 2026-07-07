@@ -388,3 +388,95 @@ D:\Anaconda3\envs\yolov11\python.exe predict.py model="runs/detect/traffic_4cls_
 ```powershell
 D:\Anaconda3\envs\yolov11\python.exe predict.py model="runs/detect/traffic_4cls_yolov8m/weights/best.pt" source="traffic_test.mp4" imgsz=960 conf=0.3 show=False name=traffic_4cls_predict_all class_filter=null
 ```
+
+## 车辆三分类补充实验最终记录
+
+### 数据集划分
+
+本次补充实验将 CVAT 导出的 7 组交通目标数据整理为三分类车辆检测数据集，类别定义如下：
+
+```text
+0 bus
+1 car
+2 two_wheeler
+```
+
+由于 `truck` 类样本数为 0，本次训练不保留 truck 类；原始 `two_wheeler` 类别编号由 3 重映射为 2。
+
+数据集划分方式如下，按视频片段划分，避免同一视频相邻帧同时出现在训练集和测试集中：
+
+```text
+train: dataset/1, dataset/2, dataset/3, dataset/4, dataset/5
+val:   dataset/6
+test:  dataset/7
+```
+
+合并后的数据规模：
+
+| split | images | labels |
+|---|---:|---:|
+| train | 2432 | 2432 |
+| val | 196 | 196 |
+| test | 556 | 556 |
+
+标注框数量：
+
+| class | boxes |
+|---|---:|
+| bus | 720 |
+| car | 9601 |
+| two_wheeler | 2814 |
+
+### 训练配置
+
+训练设备为本地 RTX 4060 Laptop GPU。由于 `yolov8m + imgsz=960` 在本地训练时资源占用较高，最终采用轻量化训练配置：
+
+```text
+model: yolov8s.pt
+epochs: 30
+imgsz: 640
+batch: 16
+workers: 4
+cache: False
+device: 0
+```
+
+训练输出目录：
+
+```text
+D:/YOLO/runs/traffic_3cls_yolov8s_fast_b162
+```
+
+最优权重：
+
+```text
+D:/YOLO/runs/traffic_3cls_yolov8s_fast_b162/weights/best.pt
+```
+
+### 验证集训练末轮指标
+
+训练末轮，即 epoch 29，对应指标如下：
+
+| Precision | Recall | mAP50 | mAP50-95 |
+|---:|---:|---:|---:|
+| 0.95897 | 0.70718 | 0.80480 | 0.47277 |
+
+### 测试集评估结果
+
+测试集使用 `dataset/7`，即由 `7.mp4` 抽帧并标注得到的图片序列。测试集评估命令实际使用 `traffic_vehicle_test.yaml`，其中 `val` 指向 `images/test`。
+
+测试集总体结果：
+
+| Class | Images | Instances | Precision | Recall | mAP50 | mAP50-95 |
+|---|---:|---:|---:|---:|---:|---:|
+| all | 556 | 2216 | 0.844 | 0.558 | 0.723 | 0.350 |
+| car | 556 | 1137 | 0.841 | 0.966 | 0.967 | 0.517 |
+| two_wheeler | 556 | 1079 | 0.848 | 0.149 | 0.478 | 0.183 |
+
+测试结果表明，模型对小汽车目标具有较好的检测能力，`car` 类召回率达到 0.966，mAP50 达到 0.967；但对 `two_wheeler` 类召回率较低，仅为 0.149，说明二轮车目标漏检较多。造成该问题的主要原因包括二轮车目标尺寸较小、外观变化大、遮挡频繁，以及训练样本中二轮车与背景、车辆之间的尺度差异较明显。
+
+### 论文可用结论
+
+本次车辆三分类补充实验表明，自建数据集微调后的 YOLOv8s 能够较好适应实际道路场景中的小汽车检测任务，在测试集上 `car` 类取得 0.967 的 mAP50 和 0.966 的召回率。相比直接使用 COCO 预训练模型，微调模型的类别定义更加贴合本课设场景，可区分 `bus`、`car` 和 `two_wheeler` 三类交通目标。
+
+同时，实验也暴露出二轮车检测性能不足的问题。`two_wheeler` 类 Precision 为 0.848，但 Recall 仅为 0.149，说明当前模型对二轮车预测较谨慎，误检较少但漏检严重。后续若继续提升性能，应优先补充二轮车近景、远景、遮挡和不同方向运动样本，或提高输入分辨率、增加训练轮数，并考虑对小目标进行针对性数据增强。

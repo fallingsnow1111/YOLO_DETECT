@@ -1,0 +1,6 @@
+path: C:/Users/LuoXue/Desktop/YOLOv8-DeepSORT-Object-Tracking-main/YOLOv8-DeepSORT-Object-Tracking-main/ultralytics/yolo/v8/detect/traffic_vehicle_dataset_3cls
+train: images/train
+val: images/test
+test: images/test
+nc: 3
+names: ['bus', 'car', 'two_wheeler']

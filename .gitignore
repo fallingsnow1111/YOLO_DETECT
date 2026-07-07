@@ -146,6 +146,14 @@ train.log
 *.rar
 *.7z
 *.cache
+
+# Compact CVAT video dataset used by Kaggle runtime extraction
+!ultralytics/yolo/v8/dataset/
+!ultralytics/yolo/v8/dataset/mp4/
+!ultralytics/yolo/v8/dataset/mp4/*.mp4
+!ultralytics/yolo/v8/dataset/labels/
+!ultralytics/yolo/v8/dataset/labels/*.zip
+
 ultralytics/yolo/v8/detect/dataset/
 ultralytics/yolo/v8/detect/traffic_vehicle_dataset_3cls/
 ultralytics/yolo/v8/detect/runs/

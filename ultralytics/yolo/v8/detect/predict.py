@@ -4,6 +4,7 @@ import hydra
 import torch
 import argparse
 import time
+import atexit
 from pathlib import Path
 
 import cv2
@@ -22,6 +23,10 @@ from collections import deque
 import numpy as np
 palette = (2 ** 11 - 1, 2 ** 15 - 1, 2 ** 20 - 1)
 data_deque = {}
+DETECT_DIR = Path(__file__).resolve().parent
+track_counts = {}
+track_names = {}
+track_output_dir = None
 
 deepsort = None
 
@@ -52,7 +57,10 @@ def filter_detections_by_class(det, class_filter):
 def init_tracker():
     global deepsort
     cfg_deep = get_config()
-    cfg_deep.merge_from_file("deep_sort_pytorch/configs/deep_sort.yaml")
+    cfg_deep.merge_from_file(str(DETECT_DIR / "deep_sort_pytorch" / "configs" / "deep_sort.yaml"))
+    reid_ckpt = Path(cfg_deep.DEEPSORT.REID_CKPT)
+    if not reid_ckpt.is_absolute():
+        cfg_deep.DEEPSORT.REID_CKPT = str(DETECT_DIR / reid_ckpt)
 
     deepsort= DeepSort(cfg_deep.DEEPSORT.REID_CKPT,
                             max_dist=cfg_deep.DEEPSORT.MAX_DIST, min_confidence=cfg_deep.DEEPSORT.MIN_CONFIDENCE,
@@ -190,6 +198,69 @@ def draw_boxes(img, bbox, names,object_id, identities=None, offset=(0, 0)):
     return img
 
 
+def record_track_counts(names, object_ids, identities):
+    global track_names
+    if identities is None:
+        return
+    track_names = names
+    for cls_id, track_id in zip(object_ids, identities):
+        cls_id = int(cls_id)
+        track_id = int(track_id)
+        track_counts.setdefault(cls_id, set()).add(track_id)
+
+
+def class_name(names, cls_id):
+    if isinstance(names, dict):
+        return names.get(cls_id, str(cls_id))
+    if cls_id < len(names):
+        return names[cls_id]
+    return str(cls_id)
+
+
+def write_track_count_summary():
+    if not track_counts:
+        return
+    lines = ["Unique tracked object counts:"]
+    total = 0
+    for cls_id in sorted(track_counts):
+        count = len(track_counts[cls_id])
+        total += count
+        lines.append(f"{class_name(track_names, cls_id)}: {count}")
+    lines.append(f"total: {total}")
+    summary = "\n".join(lines)
+    print("\n" + summary)
+    if track_output_dir is not None:
+        Path(track_output_dir).mkdir(parents=True, exist_ok=True)
+        (Path(track_output_dir) / "track_counts.txt").write_text(summary + "\n", encoding="utf-8")
+
+
+atexit.register(write_track_count_summary)
+
+
+def draw_count_overlay(img, names):
+    if not track_counts:
+        return img
+    lines = []
+    total = 0
+    for cls_id in sorted(track_counts):
+        count = len(track_counts[cls_id])
+        total += count
+        lines.append(f"{class_name(names, cls_id)}: {count}")
+    lines.append(f"total: {total}")
+
+    x, y = 12, 28
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.8
+    thickness = 2
+    line_h = 30
+    max_w = max(cv2.getTextSize(line, font, font_scale, thickness)[0][0] for line in lines)
+    cv2.rectangle(img, (x - 8, y - 24), (x + max_w + 12, y + line_h * len(lines) - 4), (0, 0, 0), -1)
+    cv2.rectangle(img, (x - 8, y - 24), (x + max_w + 12, y + line_h * len(lines) - 4), (80, 220, 80), 2)
+    for i, line in enumerate(lines):
+        cv2.putText(img, line, (x, y + line_h * i), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+    return img
+
+
 class DetectionPredictor(BasePredictor):
 
     def get_annotator(self, img):
@@ -215,6 +286,7 @@ class DetectionPredictor(BasePredictor):
         return preds
 
     def write_results(self, idx, preds, batch):
+        global track_output_dir
         p, im, im0 = batch
         all_outputs = []
         log_string = ""
@@ -229,6 +301,7 @@ class DetectionPredictor(BasePredictor):
             frame = getattr(self.dataset, 'frame', 0)
 
         self.data_path = p
+        track_output_dir = self.save_dir
         save_path = str(self.save_dir / p.name)  # im.jpg
         self.txt_path = str(self.save_dir / 'labels' / p.stem) + ('' if self.dataset.mode == 'image' else f'_{frame}')
         log_string += '%gx%g ' % im.shape[2:]  # print string
@@ -263,8 +336,10 @@ class DetectionPredictor(BasePredictor):
             bbox_xyxy = outputs[:, :4]
             identities = outputs[:, -2]
             object_id = outputs[:, -1]
+            record_track_counts(self.model.names, object_id, identities)
             
             draw_boxes(im0, bbox_xyxy, self.model.names, object_id,identities)
+            draw_count_overlay(im0, self.model.names)
 
         return log_string
 

@@ -1,18 +1,31 @@
 from __future__ import annotations
 
 import shutil
+import argparse
 from collections import Counter
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_ROOT = ROOT / "ultralytics" / "yolo" / "v8" / "detect" / "dataset"
-OUTPUT_ROOT = ROOT / "ultralytics" / "yolo" / "v8" / "detect" / "traffic_vehicle_dataset_3cls"
 
-SPLITS = {
-    "train": ["1", "2", "3", "4", "5"],
-    "val": ["6"],
-    "test": ["7"],
+VARIANTS = {
+    "baseline": {
+        "output": ROOT / "ultralytics" / "yolo" / "v8" / "detect" / "traffic_vehicle_dataset_3cls",
+        "splits": {
+            "train": ["1", "2", "3", "4", "5"],
+            "val": ["6"],
+            "test": ["7"],
+        },
+    },
+    "improved": {
+        "output": ROOT / "ultralytics" / "yolo" / "v8" / "detect" / "traffic_vehicle_dataset_improved_3cls",
+        "splits": {
+            "train": ["1", "2", "3", "4", "5", "7"],
+            "val": ["6"],
+            "test": ["6"],
+        },
+    },
 }
 
 # CVAT export IDs: 0 bus, 1 car, 2 truck, 3 two_wheeler.
@@ -47,22 +60,32 @@ def convert_label(src: Path, dst: Path) -> Counter:
     return counts
 
 
-def prepare_dirs() -> None:
-    if OUTPUT_ROOT.exists():
-        raise SystemExit(f"Output already exists, remove it first if you want to rebuild: {OUTPUT_ROOT}")
+def prepare_dirs(output_root: Path, splits: dict[str, list[str]], overwrite: bool) -> None:
+    if output_root.exists():
+        if not overwrite:
+            raise SystemExit(f"Output already exists, use --overwrite to rebuild: {output_root}")
+        shutil.rmtree(output_root)
 
-    for split in SPLITS:
-        (OUTPUT_ROOT / "images" / split).mkdir(parents=True, exist_ok=True)
-        (OUTPUT_ROOT / "labels" / split).mkdir(parents=True, exist_ok=True)
+    for split in splits:
+        (output_root / "images" / split).mkdir(parents=True, exist_ok=True)
+        (output_root / "labels" / split).mkdir(parents=True, exist_ok=True)
 
 
 def main() -> None:
-    prepare_dirs()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--variant", choices=VARIANTS.keys(), default="baseline")
+    parser.add_argument("--overwrite", action="store_true")
+    args = parser.parse_args()
+
+    output_root = VARIANTS[args.variant]["output"]
+    splits = VARIANTS[args.variant]["splits"]
+
+    prepare_dirs(output_root, splits, args.overwrite)
     total_images = Counter()
     total_boxes = Counter()
     empty_labels = Counter()
 
-    for split, dataset_ids in SPLITS.items():
+    for split, dataset_ids in splits.items():
         for dataset_id in dataset_ids:
             image_dir = SOURCE_ROOT / dataset_id / "images" / "train"
             label_dir = SOURCE_ROOT / dataset_id / "labels" / "train"
@@ -72,8 +95,8 @@ def main() -> None:
                     continue
 
                 stem = f"d{dataset_id}_{image_path.stem}"
-                dst_image = OUTPUT_ROOT / "images" / split / f"{stem}{image_path.suffix.lower()}"
-                dst_label = OUTPUT_ROOT / "labels" / split / f"{stem}.txt"
+                dst_image = output_root / "images" / split / f"{stem}{image_path.suffix.lower()}"
+                dst_label = output_root / "labels" / split / f"{stem}.txt"
                 src_label = label_dir / f"{image_path.stem}.txt"
 
                 shutil.copy2(image_path, dst_image)
@@ -85,16 +108,16 @@ def main() -> None:
                     empty_labels[split] += 1
 
     yaml_text = (
-        f"path: {OUTPUT_ROOT.as_posix()}\n"
+        f"path: {output_root.as_posix()}\n"
         "train: images/train\n"
         "val: images/val\n"
         "test: images/test\n"
         "nc: 3\n"
         f"names: {NAMES!r}\n"
     )
-    (OUTPUT_ROOT / "traffic_vehicle_3cls.yaml").write_text(yaml_text, encoding="utf-8")
+    (output_root / "traffic_vehicle_3cls.yaml").write_text(yaml_text, encoding="utf-8")
 
-    print("Dataset prepared:", OUTPUT_ROOT)
+    print("Dataset prepared:", output_root)
     print("Images:", dict(total_images))
     print("Empty labels:", dict(empty_labels))
     print("Boxes:", {NAMES[k]: total_boxes[k] for k in range(len(NAMES))})
